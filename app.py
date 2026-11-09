@@ -2,15 +2,19 @@ import numpy as np
 import tensorflow as tf
 import gradio as gr
 import matplotlib.pyplot as plt
-from PIL import Image
+from PIL import Image, ImageDraw
 
 model = tf.keras.models.load_model("modelo_mnist.keras")
 
 
-def extract_foreground(image):
+def image_on_white(image):
     if image is None:
         raise gr.Error("Subí o pegá una imagen.")
-    image = Image.alpha_composite(Image.new("RGBA", image.size, "white"), image.convert("RGBA")).convert("RGB")
+    return Image.alpha_composite(Image.new("RGBA", image.size, "white"), image.convert("RGBA")).convert("RGB")
+
+
+def extract_foreground(image):
+    image = image_on_white(image)
     grayscale = np.asarray(image.convert("L"), dtype=np.float32)
     border = np.concatenate([grayscale[0], grayscale[-1], grayscale[:, 0], grayscale[:, -1]])
     background = np.median(border)
@@ -61,21 +65,37 @@ def _column_segments(pixels):
 
 
 def preprocess(image):
-    """Convert an image of separated digits to one MNIST-sized image per digit."""
+    """Return model inputs, a binary mask, and the bounds of detected digits."""
     pixels = extract_foreground(image)
     mask = pixels > 0.15
     ys, xs = np.where(mask)
     if not len(xs):
         raise gr.Error("No encontré dígitos separados del fondo.")
-    pixels = pixels[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    mask = mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-    segments = _column_segments(mask.astype(np.float32))
-    digits = [normalize_digit(pixels[:, start:end]) for start, end in segments]
-    return np.stack(digits)
+    top, bottom = ys.min(), ys.max() + 1
+    left, right = xs.min(), xs.max() + 1
+    cropped_pixels = pixels[top:bottom, left:right]
+    cropped_mask = mask[top:bottom, left:right]
+    segments = _column_segments(cropped_mask.astype(np.float32))
+    if not segments:
+        raise gr.Error("No pude separar los dígitos. Escribilos más grandes y con trazos más gruesos.")
+
+    digits = []
+    bounds = []
+    for start, end in segments:
+        segment_mask = cropped_mask[:, start:end]
+        segment_ys = np.where(segment_mask)[0]
+        if not len(segment_ys):
+            continue
+        digits.append(normalize_digit(cropped_pixels[:, start:end]))
+        bounds.append((left + start, top + segment_ys.min(), left + end - 1, top + segment_ys.max()))
+
+    if not digits:
+        raise gr.Error("No pude separar los dígitos. Escribilos más grandes y con trazos más gruesos.")
+    return np.stack(digits), Image.fromarray(mask.astype(np.uint8) * 255), bounds
 
 
 def predict(image):
-    digits_input = preprocess(image)
+    digits_input, binary_mask, bounds = preprocess(image)
     probabilities = model.predict(digits_input, verbose=0)
     digits = "".join(map(str, probabilities.argmax(axis=1)))
     fig, ax = plt.subplots(figsize=(7, 3))
@@ -86,22 +106,34 @@ def predict(image):
     ax.set(xticks=positions, ylim=(0, 1), xlabel="Dígito", ylabel="Probabilidad")
     if len(probabilities) > 1:
         ax.legend()
+
+    marked_regions = image_on_white(image)
+    draw = ImageDraw.Draw(marked_regions)
+    line_width = max(2, round(max(marked_regions.size) / 250))
+    for index, (left, top, right, bottom) in enumerate(bounds, start=1):
+        draw.rectangle((left, top, right, bottom), outline="red", width=line_width)
+        draw.text((left, max(0, top - 14)), str(index), fill="red", stroke_width=1, stroke_fill="white")
+
     preview = np.zeros((28, 28 * len(digits_input) + 4 * (len(digits_input) - 1)), dtype=np.float32)
     for index, digit in enumerate(digits_input):
         start = index * 32
         preview[:, start:start + 28] = digit
-    preview = Image.fromarray((preview * 255).astype(np.uint8))
-    return digits, fig, preview
+    preview = Image.fromarray((preview * 255).astype(np.uint8)).resize(
+        (preview.shape[1] * 8, preview.shape[0] * 8), Image.Resampling.NEAREST
+    )
+    return digits, fig, binary_mask, marked_regions, preview
 
 with gr.Blocks() as demo:
     gr.Markdown("# Clasificador MNIST")
-    gr.Markdown("Escribí un número grande, con trazos claros y separados. La vista previa muestra lo que recibe el modelo; si el dígito no se ve bien ahí, volvé a subir la imagen.")
+    gr.Markdown("Escribí un número grande, con trazos claros y separados. La máscara muestra los trazos detectados; los cuadros rojos indican cada recorte. La entrada al modelo muestra cada recorte centrado en 28×28 píxeles.")
     upload = gr.Image(label="Subí o pegá una imagen", type="pil", sources=["upload", "clipboard"])
     button = gr.Button("Predecir", variant="primary")
     number = gr.Textbox(label="Número predicho", text_align="center", scale=1)
     chart = gr.Plot(label="Probabilidades")
-    preview = gr.Image(label="Vista previa procesada")
-    button.click(predict, upload, [number, chart, preview])
+    binary_preview = gr.Image(label="Imagen en blanco y negro (trazo detectado en blanco)")
+    regions_preview = gr.Image(label="Partes analizadas (cuadros rojos)")
+    model_preview = gr.Image(label="Entrada exacta al modelo (28×28 por dígito)")
+    button.click(predict, upload, [number, chart, binary_preview, regions_preview, model_preview])
 
 if __name__ == "__main__":
     demo.launch()
