@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 
 model = tf.keras.models.load_model("modelo_mnist.keras")
+MAX_DIGITS = 4
 
 
 def image_on_white(image):
@@ -78,6 +79,8 @@ def preprocess(image):
     segments = _column_segments(cropped_mask.astype(np.float32))
     if not segments:
         raise gr.Error("No pude separar los dígitos. Escribilos más grandes y con trazos más gruesos.")
+    if len(segments) > MAX_DIGITS:
+        raise gr.Error(f"Podés ingresar como máximo {MAX_DIGITS} dígitos por imagen. Separá el número en imágenes más pequeñas.")
 
     digits = []
     bounds = []
@@ -125,7 +128,7 @@ def predict(image):
 
 with gr.Blocks() as demo:
     gr.Markdown("# Clasificador MNIST")
-    gr.Markdown("Escribí un número grande, con trazos claros y separados. La máscara muestra los trazos detectados; los cuadros rojos indican cada recorte. La entrada al modelo muestra cada recorte centrado en 28×28 píxeles.")
+    gr.Markdown(f"Escribí hasta {MAX_DIGITS} dígitos grandes, con trazos claros y separados. La máscara muestra los trazos detectados; los cuadros rojos indican cada recorte. La entrada al modelo muestra cada recorte centrado en 28×28 píxeles.")
     upload = gr.Image(label="Subí o pegá una imagen", type="pil", sources=["upload", "clipboard"])
     button = gr.Button("Predecir", variant="primary")
     number = gr.Textbox(label="Número predicho", text_align="center", scale=1)
